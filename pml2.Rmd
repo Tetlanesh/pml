@@ -1,0 +1,415 @@
+---
+title: "Course project for Practical Machine Learning"
+author: "Marcin Struœ"
+date: "Sunday, March 17, 2015"
+output: html_document
+---
+
+## Synopsis
+
+Our goal is to fit machine learning model that will predict, based on the readings of sensors, if particular "barrel lift" performed by study subject, was done properly or not.
+
+Data that will be used was provided by [Groupware@LES](http://groupware.les.inf.puc-rio.br/har) and contains readings from set of sensors placed at various part of users body while performing "barbell lifts". Each reading contains information if particular lift was done corectly or not (5 classes of results). 
+
+For most part I will be using R `caret` package for learning and testing of our models. Becasue of technical dificulties with some models in `caret` I used their respected packages.
+
+
+## Glimps at data and pre-processing
+Before we delve into advanced machine learning algorythms lets start with simple exploratory analysis. Lets download dataset and take a look at its structure and how values that we are trying to predict are represented in it.
+
+First of all we are given two data sets. Training and test data. However "testing" set contains only 20 records and is mainly used for second part of assignment, while "training" set contains 19622. We will be using "training" set for both: training and testing (after partitioning ofc). whilte "testing" set will be named `assignment` and be used to predict 20 values for submission assigment for this class.
+
+```{r}
+library(caret)#wrapper around other model packages
+library(corrplot)#library to plot large correlation matrix. (pairs function gives up when dealing with 50+ variables)
+library(parallel) #library for parallel computing
+library(doParallel) #library for parallel computing
+library(foreach) #library for parallel computing
+library(kernlab)
+library(nnet)
+
+if(!file.exists("training.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv","training.csv")
+}
+
+if(!file.exists("assignment.csv")){
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv","assignment.csv")
+}
+
+
+barell_lifts <- read.csv("training.csv",na.strings=c("", "NA", "#DIV/0!"))
+assignment <- read.csv("assignment.csv",na.strings=c("", "NA", "#DIV/0!"))
+```
+
+First thing we notice after opening this dataset is that it contains tons of NA's. Over 61% of cells are NA's therefore, since we are not provided with codebook for this dataset that could sheed more light on nature of missing data, I'm just going to assume I can use my best judgment on dealing with them.
+
+After simple analysis of each column it turns out that there is a set of 100 columns that is literally just NA's (more than 19000 NA's) while the rest have all data filled.
+
+Another aspect of missing codebook is that it is unclear how to treat time dimension in this dataset, therefore I am going to assume that each row describes diffrent atempt.
+
+
+```{r}
+NAs <- apply(is.na(barell_lifts)*1,2,sum)
+barell_lifts<-barell_lifts[,names(NAs[NAs==0])]
+
+names(assignment)[160]<-"classe" #this is to have the same names across frames, to ease tranfrormation using the same rules
+assignment<-assignment[,names(NAs[NAs==0])]
+
+
+
+#changing type to numeric, as read.csv treated all numbers as text
+barell_lifts[,8:59]<-apply(barell_lifts[,8:59],2,as.numeric)
+assignment[,8:59]<-apply(assignment[,8:59],2,as.numeric)
+
+#removing non-features columns
+barell_lifts<-barell_lifts[,8:60]
+assignment<-assignment[,8:60]
+
+```
+
+So I decided to remove those columns completly. That leaves only 60, of which only 52 are actuall features. Another thing I decided to remove was first 7 columns that contained only descriptive data about each record (who, when, trial number,etc...) and are not actuall features. We are left with much smaller dataset, that contains only 53 columns.
+
+We now partion data into 3 sets. `Training` that will be used to train each model, `cross-validation` set that will be used to evaluate each moodel for model selection and parameter tuning and finally `testing` set that will be used to evaluate final model (60/20/20 split).
+
+```{r}
+set.seed(42)
+
+#first split into Training and Testing
+inTrain <- createDataPartition(y=barell_lifts$classe, p=0.60, list=FALSE) #splitting data into train and test data
+training <- barell_lifts[inTrain,] #indexing using partition split
+testing <- barell_lifts[-inTrain,] #indexing using partition split
+
+#second split of Testing set into CV and Testing set
+inCV <- createDataPartition(y=testing$classe, p=0.50, list=FALSE) #splitting data into train and test data
+crossval <- testing[inCV,] #indexing using partition split
+testing <- testing[-inCV,] #indexing using partition split
+
+rm(barell_lifts) #removing needles object from memory, as this script is very memory dependant
+```
+
+So now we have to check for three things:
+
+
+1. Remove features that have close to zero variance in their values
+2. Make sure that all values have as normal and stardarized distribution
+3. Replace highly corelated features with their PCA components
+
+Lets start with looking for `Near Zero Variance` features:
+```{r}
+nzv = nearZeroVar(training, saveMetrics = FALSE, allowParallel = TRUE)
+```
+
+Using R's `nearZeroVar` function we determined that there are no features that have variance close to zero, so we dont have to remove any features based on that criteria.
+
+
+Now lets stardarize and try to remove skewnes (if exists). This is simply done using R `caret` function `preProcess`:
+```{r}
+PreProc_CSB <-preProcess(training[,-53],method= c("center", "scale", "BoxCox")) #using standarisation (scale, center) and BoxCox to reduce skewness
+training[,-53] <- predict(PreProc_CSB, training[,-53]) #transforming data in dataset
+```
+
+
+
+Now lets look at correlations. We are taking all pairs that have corelation larger than 0.8 and calculate few PCA components of this subset of features that describes at least 95% variance in set:
+```{r}
+M <- abs(cor(training[,-53])) #compute the absolute values of correlation matrix
+diag(M) <- 0 # replace diagonal with zeroes
+corrplot(M, order = "hclust",tl.cex = 0.5) #plot corelation matrix
+c80 <- which(M > 0.8,arr.ind=T,useNames = FALSE) #look for all corelations greater than .8
+c80<-as.vector(unique(c80[,1])) #get list of features that have other highly corelated feature
+```
+
+
+We calculate PCA from 22 features that where highly corelated with other features, reducing them to only 9 variables, so in total we are left with 39 features: 
+```{r}
+preProc_PCA <- preProcess(training[,c80],method="pca",thres=.95) #run PCA on selected features
+train_PCA <- predict(preProc_PCA,training[,c80]) #store recalculated values
+training <- cbind(train_PCA,training[,-c80]) #recombine datasets so we have non corelated values and PCA's components
+
+```
+ 
+## Fitting of models
+
+Now we are going to implement few models that I decided to try for this excercise, most of which where covered in coursera class:
+
+1. Random Forest - as a benchmark for all other models, both for time taken to build and for accuracy
+2. Decission Tree
+3. Discriminant Analysis (both Linear and Quadratic)
+4. Naive Bayes
+5. Multinomial Logistic Regression
+6. Support Vector MAtrix
+7. Neural Networks
+
+All model where trained on `training` data set and we are cross-validating them on `crossval`. This way we can assess In and Out of Sample Errors for all models without "tainting" testing set. After evaluating all of those models and choosing one as the best we will calculate final Out of Sample Error for that model and using it to predict values of classe for our `assignment` dataset.
+
+First lets preprocess `crossval`, `testing` and `assignment` datasets using the same steps that we used on `training` set, so we can evaluate results of models.
+```{r}
+#step one: Center, Scale, BoxCox
+testing[,-53] <- predict(PreProc_CSB, testing[,-53])
+crossval[,-53] <- predict(PreProc_CSB, crossval[,-53])
+assignment[,-53] <- predict(PreProc_CSB, assignment[,-53])
+
+#step two: PCA
+test_PCA <- predict(preProc_PCA,testing[,c80]) 
+testing <- cbind(test_PCA,testing[,-c80]) 
+
+cross_PCA <- predict(preProc_PCA,crossval[,c80]) 
+crossval <- cbind(cross_PCA,crossval[,-c80])
+
+assign_PCA <- predict(preProc_PCA,assignment[,c80]) 
+assignment <- cbind(assign_PCA,assignment[,-c80])
+
+```
+
+### Computing models
+Below is the code used to train all of the models. For some of the models it was very time consuming process (up to 3 hours on my machine) while others took only few seconds. I had many problems when using some of the machine learning algorythms using `caret` `train` function and had to use diffrent packages to run those.
+
+```{r eval=FALSE}
+#initialize parallel computing
+cl <- makePSOCKcluster(4)
+clusterEvalQ(cl, library(foreach))
+registerDoParallel(cl)
+
+#training option to allow parallelization
+trCtrl <- trainControl(allowParallel = TRUE)
+
+#Random Forest using rf method
+set.seed(42)
+modFit1 <- train(classe~ .,data=training,method="rf",prox=TRUE, ntree = 500, trainControl = trCtrl)
+save(modFit1,file = "RF1.RData"); 
+rm(modFit1)
+
+#decission tree using rpart
+set.seed(42)
+modFit3 <- train(classe ~ .,method="rpart",data=training)
+save(modFit3,file = "TREE3.RData");
+rm(modFit3)
+
+#linear and quadratic discriminant analysis
+set.seed(42)
+modFit4 <- train(classe ~ .,method="lda",data=training, trainControl = trCtrl)
+modFit5 <- train(classe ~ .,method="qda",data=training, trainControl = trCtrl)
+save(modFit4,file = "LDA4.RData"); 
+save(modFit5,file = "QDA5.RData"); 
+rm(modFit4)
+rm(modFit5)
+
+#random forest uning specialised parallel library parRF
+set.seed(42)
+ptm <- proc.time()
+modFit2 <- train(classe~ .,data=training, trControl = trCtrl, method="parRF",prox=TRUE, ntree = 500)
+proc.time() - ptm
+
+save(modFit2,file = "RF2.RData") #storing of RF object in file
+rm(modFit2)
+
+#Naive Bayes
+set.seed(42)
+ptm <- proc.time()
+modFit6 <- train(classe ~ .,method="nb",data=training, trainControl = trCtrl)
+proc.time() - ptm
+
+save(modFit6,file = "NB6.RData") #storing of NB object in file
+rm(modFit6)
+
+
+stopCluster(cl)
+
+#Multinomial Logistic Regression - basic and with polynomial components of 3rd order
+set.seed(42)
+modFit7 <- multinom(classe ~ ., data = training)
+modFit7_poly <- multinom(classe ~ (.)^2, data = training, MaxNWts = 1000000)
+
+save(modFit7,file = "MLR7.RData") #storing of NB object in file
+save(modFit7_poly,file = "MLR7P.RData") #storing of NB object in file
+
+rm(modFit7)
+rm(modFit7_poly)
+
+
+#Support Vector Matrix
+set.seed(42)
+rbf <- rbfdot(sigma=0.1)
+modFit8 <- ksvm(classe~.,data=training,type="C-bsvc",kernel=rbf,C=10,prob.model=TRUE)
+
+save(modFit8,file = "SVM8.RData")
+rm(modFit8)
+
+
+#neural network with single layer
+set.seed(42)
+classe <- class.ind(training$classe)
+modFit9 <- nnet(training[,1:ncol(training)-1], classe, size=ncol(training)-1, MaxNWts = 10000, softmax=TRUE, maxit = 500)
+save(modFit9,file = "NN9.RData")
+rm(modFit9)
+```
+## Models evaluation
+
+There are big diffrences in predictive accuracy between those models. As a meassure of predictive accuracy I used Missclalculation ration (count of misslassified cases / count of all cases). 
+
+First step is to predict new values by computed models using both: `crossval` and `training` set so we can calculate both In and Out of Sample Errors and choose model taht will be used for final evaluation on `testing` set.
+
+Additional information regarding calculations:
+
+1. For Random Forest I used two diffrent implementations as a result of testing parallelization of computing. 
+2. For Multinomial Logistic Regression on top of running it on the same dataset we used for other models I've also run it separatly and added one additional tweak to list of features used: I've added polynomial components using `formula = classe ~ (.)^2` resulting in total of 781 features used in model.
+3. For Neural Networks I've decided to use single hidden layer network with number of nodes in hidden layer equal to number of features and 500 iterations. Using `nnet` also required one additional step: preparing response matrix for it to work (matrix containing binary decomposition of 5 class in `classe` into 5 0/1 columns)
+4. For SVM I used `rbfdot(sigma=0.1)` as kernel function just like in example prowided in help file for kernel functions.
+
+
+```{r eval=FALSE}
+load("NN9.RData")
+load("SVM8.RData")
+load("NB6.RData")
+load("RF2.RData")
+load("QDA5.RData")
+load("LDA4.RData")
+load("TREE3.RData")
+load("RF1.RData")
+load("MLR7.RData")
+load("MLR7P.RData")
+
+max <- ncol(training)-1
+
+set.seed(42)
+train1 <- predict(modFit1,training[,1:max])
+cross1 <- predict(modFit1,crossval[,1:max])
+rm(modFit1)
+
+set.seed(42)
+train2 <- predict(modFit2,training[,1:max])
+cross2 <- predict(modFit2,crossval[,1:max])
+rm(modFit2)
+
+set.seed(42)
+train3 <- predict(modFit3,training[,1:max])
+cross3 <- predict(modFit3,crossval[,1:max])
+rm(modFit3)
+
+set.seed(42)
+train4 <- predict(modFit4,training[,1:max])
+cross4 <- predict(modFit4,crossval[,1:max])
+rm(modFit4)
+
+set.seed(42)
+train5 <- predict(modFit5,training[,1:max])
+cross5 <- predict(modFit5,crossval[,1:max])
+rm(modFit5)
+
+set.seed(42)
+train6 <- predict(modFit6,training[,1:max])
+cross6 <- predict(modFit6,crossval[,1:max])
+rm(modFit6)
+
+set.seed(42)
+train7 <- predict(modFit7,training[,1:max])
+cross7 <- predict(modFit7,crossval[,1:max])
+rm(modFit7)
+
+set.seed(42)
+train7P <- predict(modFit7_poly,training[,1:max])
+cross7P <- predict(modFit7_poly,crossval[,1:max])
+rm(modFit7_poly)
+
+set.seed(42)
+train8 <- predict(modFit8,training[,1:max], type="response")
+cross8 <- predict(modFit8,crossval[,1:max], type="response")
+rm(modFit8)
+
+set.seed(42)
+train9 <- predict(modFit9,training[,1:max], type="class")
+cross9 <- predict(modFit9,crossval[,1:max], type="class")
+rm(modFit9)
+
+
+errors <- function(train, cross, name)
+{
+  
+  ISE_table<-table(train, training$classe)
+  ISE_table<-as.matrix(ISE_table)
+  ISE<-(sum(ISE_table)-sum(diag(ISE_table))) / sum(ISE_table)
+  
+  OSE_table<-table(cross, crossval$classe)
+  OSE_table<-as.matrix(OSE_table)
+  OSE<-(sum(OSE_table)-sum(diag(OSE_table))) / sum(OSE_table)
+  data.frame(Name = name, ISE = ISE, OSE = OSE)
+
+  
+}
+
+error_table<-rbind(
+  errors(train1, cross1, "RF - rf"),
+  errors(train2, cross2, "RF - parRF"),
+  errors(train3, cross3, "Tree"),
+  errors(train4, cross4, "LDA"),
+  errors(train5, cross5, "QDA"),
+  errors(train6, cross6, "NBayes"),
+  errors(train7, cross7, "MLR"),
+  errors(train7P, cross7P, "MLR poly"),
+  errors(train8, cross8, "SVM"),
+  errors(train9, cross9, "NNet")
+  )
+
+save(error_table,file="error.RData")
+
+```
+
+
+### Models results
+
+
+```{r}
+load("error.RData")
+#ordered list of model errors
+error_table[order(error_table$OSE,decreasing = FALSE),]
+```
+
+As we can see both implementations of **Random Forest** produced best results, followed by **SVM**. All of them got **Out of Sample Error of 1% or less**. Noticably **NNet** produced In Sample Error of **0.00000%** - cerectly predicting all observations using `training`. Below **10% OSE** we also have mentioned **NNet** and **Logistic Regression with polynomials**. 
+
+In contrast **Decission Tree** produce 50% error on both sets.
+
+Given the results I've picked **Random Forest, using parRF implementation** as a model that will be used to predict class of observations in `assignment` dataset. Firstly I have to calculate final **Out of Sample Error** on `testing` set.
+
+```{r}
+load("RF2.RData")
+max<-ncol(training)-1
+set.seed(42)
+train2 <- predict(modFit2,training[,1:max])
+test2 <- predict(modFit2,testing[,1:max])
+
+#ordered list of model errors
+ISE_table<-table(train2, training$classe)
+ISE_table<-as.matrix(ISE_table)
+ISE<-(sum(ISE_table)-sum(diag(ISE_table))) / sum(ISE_table)
+  
+OSE_table<-table(test2, testing$classe)
+OSE_table<-as.matrix(OSE_table)
+OSE<-(sum(OSE_table)-sum(diag(OSE_table))) / sum(OSE_table)
+
+data.frame(Name = "Selected model: Random Forest", ISE = ISE, Final_OSE = OSE)
+```
+
+We have exactly the same number of misslasified cases on `testing` example as we had on `crosscalidation` set, producing identical error. This gives us a strong indication of how this model will behave on yet to be seen observations and can be used in predicting this type of problems.
+
+Lets take last step and calculate predictions for `assigmnet` and prepare 20 files that will be used to submit second part of this assignment.
+
+```{r}
+set.seed(42)
+assignment$response <- predict(modFit2,assignment[,1:max])
+#remember we renamed column with problem_id to classe to retain identity between sets, so thats why i choose diffrent name
+names(assignment)[40]<-"problem_id"
+assignment$response<-as.character(assignment$response)
+answers<- as.vector(assignment$response)
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
+
+
