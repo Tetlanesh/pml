@@ -164,6 +164,15 @@ assignment <- cbind(assign_PCA,assignment[,-c80])
 ### Computing models
 Below is the code used to train all of the models. For some of the models it was very time consuming process (up to 3 hours on my machine) while others took only few seconds. I had many problems when using some of the machine learning algorythms using `caret` `train` function and had to use diffrent packages to run those.
 
+Additional information regarding calculations:
+
+1. For Random Forest I used two diffrent implementations as a result of testing parallelization of computing. 
+2. For Multinomial Logistic Regression on top of running it on the same dataset we used for other models I've also run it separatly and added one additional tweak to list of features used: I've added polynomial components using `formula = classe ~ (.)^2` resulting in total of 781 features used in model.
+3. For Neural Networks I've decided to use single hidden layer network with number of nodes in hidden layer equal to number of features and 500 iterations. Then I run it again, this time with 100 units in hidden layer and over 3000 iterations to see if results are better in any way - it turned out irt actually converged in 350-360 iterations.
+4. Using `nnet` also required one additional step: preparing response matrix for it to work (matrix containing binary decomposition of 5 class in `classe` into 5 0/1 columns).
+5. For SVM I used `rbfdot(sigma=0.1)` as kernel function just like in example prowided in help file for kernel functions.
+
+
 ```{r eval=FALSE}
 #initialize parallel computing
 cl <- makePSOCKcluster(4)
@@ -196,19 +205,13 @@ rm(modFit5)
 
 #random forest uning specialised parallel library parRF
 set.seed(42)
-ptm <- proc.time()
 modFit2 <- train(classe~ .,data=training, trControl = trCtrl, method="parRF",prox=TRUE, ntree = 500)
-proc.time() - ptm
-
 save(modFit2,file = "RF2.RData") #storing of RF object in file
 rm(modFit2)
 
 #Naive Bayes
 set.seed(42)
-ptm <- proc.time()
 modFit6 <- train(classe ~ .,method="nb",data=training, trainControl = trCtrl)
-proc.time() - ptm
-
 save(modFit6,file = "NB6.RData") #storing of NB object in file
 rm(modFit6)
 
@@ -219,10 +222,8 @@ stopCluster(cl)
 set.seed(42)
 modFit7 <- multinom(classe ~ ., data = training)
 modFit7_poly <- multinom(classe ~ (.)^2, data = training, MaxNWts = 1000000)
-
 save(modFit7,file = "MLR7.RData") #storing of NB object in file
 save(modFit7_poly,file = "MLR7P.RData") #storing of NB object in file
-
 rm(modFit7)
 rm(modFit7_poly)
 
@@ -231,7 +232,6 @@ rm(modFit7_poly)
 set.seed(42)
 rbf <- rbfdot(sigma=0.1)
 modFit8 <- ksvm(classe~.,data=training,type="C-bsvc",kernel=rbf,C=10,prob.model=TRUE)
-
 save(modFit8,file = "SVM8.RData")
 rm(modFit8)
 
@@ -242,19 +242,19 @@ classe <- class.ind(training$classe)
 modFit9 <- nnet(training[,1:ncol(training)-1], classe, size=ncol(training)-1, MaxNWts = 10000, softmax=TRUE, maxit = 500)
 save(modFit9,file = "NN9.RData")
 rm(modFit9)
+
+#neural network with single layer, with 100 unit and 1500 iterations
+set.seed(42)
+classe <- class.ind(training$classe)
+modFit0 <- nnet(training[,1:ncol(training)-1], classe, size=100, MaxNWts = 100000, softmax=TRUE, maxit = 3000)
+save(modFit0,file = "NN0.RData")
+rm(modFit0)
 ```
 ## Models evaluation
 
-There are big diffrences in predictive accuracy between those models. As a meassure of predictive accuracy I used Missclalculation ration (count of misslassified cases / count of all cases). 
+There are big diffrences in predictive accuracy between those models. As a meassure of predictive accuracy I used Misscalculation ratio (count of misslassified cases / count of all cases) and was looking for model with result of this statistic as close to 0 as possible. 
 
 First step is to predict new values by computed models using both: `crossval` and `training` set so we can calculate both In and Out of Sample Errors and choose model taht will be used for final evaluation on `testing` set.
-
-Additional information regarding calculations:
-
-1. For Random Forest I used two diffrent implementations as a result of testing parallelization of computing. 
-2. For Multinomial Logistic Regression on top of running it on the same dataset we used for other models I've also run it separatly and added one additional tweak to list of features used: I've added polynomial components using `formula = classe ~ (.)^2` resulting in total of 781 features used in model.
-3. For Neural Networks I've decided to use single hidden layer network with number of nodes in hidden layer equal to number of features and 500 iterations. Using `nnet` also required one additional step: preparing response matrix for it to work (matrix containing binary decomposition of 5 class in `classe` into 5 0/1 columns)
-4. For SVM I used `rbfdot(sigma=0.1)` as kernel function just like in example prowided in help file for kernel functions.
 
 
 ```{r eval=FALSE}
@@ -268,6 +268,7 @@ load("TREE3.RData")
 load("RF1.RData")
 load("MLR7.RData")
 load("MLR7P.RData")
+load("NN0.RData")
 
 max <- ncol(training)-1
 
@@ -321,6 +322,10 @@ train9 <- predict(modFit9,training[,1:max], type="class")
 cross9 <- predict(modFit9,crossval[,1:max], type="class")
 rm(modFit9)
 
+set.seed(42)
+train0 <- predict(modFit0,training[,1:max], type="class")
+cross0 <- predict(modFit0,crossval[,1:max], type="class")
+rm(modFit0)
 
 errors <- function(train, cross, name)
 {
@@ -347,7 +352,8 @@ error_table<-rbind(
   errors(train7, cross7, "MLR"),
   errors(train7P, cross7P, "MLR poly"),
   errors(train8, cross8, "SVM"),
-  errors(train9, cross9, "NNet")
+  errors(train9, cross9, "NNet 39/500"),
+  errors(train0, cross0, "NNet 100/3000")
   )
 
 save(error_table,file="error.RData")
@@ -364,29 +370,29 @@ load("error.RData")
 error_table[order(error_table$OSE,decreasing = FALSE),]
 ```
 
-As we can see both implementations of **Random Forest** produced best results, followed by **SVM**. All of them got **Out of Sample Error of 1% or less**. Noticably **NNet** produced In Sample Error of **0.00000%** - cerectly predicting all observations using `training`. Below **10% OSE** we also have mentioned **NNet** and **Logistic Regression with polynomials**. 
+As we can see **SVM** produced best results, followed by both implementations of **Random Forest** (with `parRF` getting slightly better results than `rf`- this has been confirmed on multiple runs with diffrent samples in `training` and `crossval` sets - `parRF` seems to get slightly better results each time). All of them got **Out of Sample Error of around 1%-2%**. Noticably, both **NNet** and **Random Forest** produced In Sample Error of **0.00000%** - corectly predicting all observations using `training`. Below **10% OSE** we also have mentioned **NNet** and **Logistic Regression with polynomials**. 
 
 In contrast **Decission Tree** produce 50% error on both sets.
 
-Given the results I've picked **Random Forest, using parRF implementation** as a model that will be used to predict class of observations in `assignment` dataset. Firstly I have to calculate final **Out of Sample Error** on `testing` set.
+Given the results I've picked **Support Vector Machine** as a model that will be used to predict class of observations in `assignment` dataset. Firstly I have to calculate final **Out of Sample Error** on `testing` set.
 
 ```{r}
-load("RF2.RData")
+load("SVM8.RData")
 max<-ncol(training)-1
 set.seed(42)
-train2 <- predict(modFit2,training[,1:max])
-test2 <- predict(modFit2,testing[,1:max])
+train8 <- predict(modFit8,training[,1:max])
+test8 <- predict(modFit8,testing[,1:max])
 
 #ordered list of model errors
-ISE_table<-table(train2, training$classe)
+ISE_table<-table(train8, training$classe)
 ISE_table<-as.matrix(ISE_table)
 ISE<-(sum(ISE_table)-sum(diag(ISE_table))) / sum(ISE_table)
   
-OSE_table<-table(test2, testing$classe)
+OSE_table<-table(test8, testing$classe)
 OSE_table<-as.matrix(OSE_table)
 OSE<-(sum(OSE_table)-sum(diag(OSE_table))) / sum(OSE_table)
 
-data.frame(Name = "Selected model: Random Forest", ISE = ISE, Final_OSE = OSE)
+data.frame(Name = "Selected model: SVM", ISE = ISE, Final_OSE = OSE)
 ```
 
 We have exactly the same number of misslasified cases on `testing` example as we had on `crosscalidation` set, producing identical error. This gives us a strong indication of how this model will behave on yet to be seen observations and can be used in predicting this type of problems.
@@ -395,11 +401,11 @@ Lets take last step and calculate predictions for `assigmnet` and prepare 20 fil
 
 ```{r}
 set.seed(42)
-assignment$response <- predict(modFit2,assignment[,1:max])
-#remember we renamed column with problem_id to classe to retain identity between sets, so thats why i choose diffrent name
+#remember we renamed column with problem_id to classe to retain identity between sets, so I return original name
 names(assignment)[40]<-"problem_id"
-assignment$response<-as.character(assignment$response)
-answers<- as.vector(assignment$response)
+assignment$classe <- predict(modFit8,assignment[,1:max])
+assignment$classe<-as.character(assignment$classe)
+answers<- as.vector(assignment$classe)
 
 pml_write_files = function(x){
   n = length(x)

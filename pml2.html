@@ -188,6 +188,14 @@ assignment &lt;- cbind(assign_PCA,assignment[,-c80])</code></pre>
 <div id="computing-models" class="section level3">
 <h3>Computing models</h3>
 <p>Below is the code used to train all of the models. For some of the models it was very time consuming process (up to 3 hours on my machine) while others took only few seconds. I had many problems when using some of the machine learning algorythms using <code>caret</code> <code>train</code> function and had to use diffrent packages to run those.</p>
+<p>Additional information regarding calculations:</p>
+<ol style="list-style-type: decimal">
+<li>For Random Forest I used two diffrent implementations as a result of testing parallelization of computing.</li>
+<li>For Multinomial Logistic Regression on top of running it on the same dataset we used for other models I’ve also run it separatly and added one additional tweak to list of features used: I’ve added polynomial components using <code>formula = classe ~ (.)^2</code> resulting in total of 781 features used in model.</li>
+<li>For Neural Networks I’ve decided to use single hidden layer network with number of nodes in hidden layer equal to number of features and 500 iterations. Then I run it again, this time with 100 units in hidden layer and over 3000 iterations to see if results are better in any way - it turned out irt actually converged in 350-360 iterations.</li>
+<li>Using <code>nnet</code> also required one additional step: preparing response matrix for it to work (matrix containing binary decomposition of 5 class in <code>classe</code> into 5 0/1 columns).</li>
+<li>For SVM I used <code>rbfdot(sigma=0.1)</code> as kernel function just like in example prowided in help file for kernel functions.</li>
+</ol>
 <pre class="r"><code>#initialize parallel computing
 cl &lt;- makePSOCKcluster(4)
 clusterEvalQ(cl, library(foreach))
@@ -219,19 +227,13 @@ rm(modFit5)
 
 #random forest uning specialised parallel library parRF
 set.seed(42)
-ptm &lt;- proc.time()
 modFit2 &lt;- train(classe~ .,data=training, trControl = trCtrl, method=&quot;parRF&quot;,prox=TRUE, ntree = 500)
-proc.time() - ptm
-
 save(modFit2,file = &quot;RF2.RData&quot;) #storing of RF object in file
 rm(modFit2)
 
 #Naive Bayes
 set.seed(42)
-ptm &lt;- proc.time()
 modFit6 &lt;- train(classe ~ .,method=&quot;nb&quot;,data=training, trainControl = trCtrl)
-proc.time() - ptm
-
 save(modFit6,file = &quot;NB6.RData&quot;) #storing of NB object in file
 rm(modFit6)
 
@@ -242,10 +244,8 @@ stopCluster(cl)
 set.seed(42)
 modFit7 &lt;- multinom(classe ~ ., data = training)
 modFit7_poly &lt;- multinom(classe ~ (.)^2, data = training, MaxNWts = 1000000)
-
 save(modFit7,file = &quot;MLR7.RData&quot;) #storing of NB object in file
 save(modFit7_poly,file = &quot;MLR7P.RData&quot;) #storing of NB object in file
-
 rm(modFit7)
 rm(modFit7_poly)
 
@@ -254,7 +254,6 @@ rm(modFit7_poly)
 set.seed(42)
 rbf &lt;- rbfdot(sigma=0.1)
 modFit8 &lt;- ksvm(classe~.,data=training,type=&quot;C-bsvc&quot;,kernel=rbf,C=10,prob.model=TRUE)
-
 save(modFit8,file = &quot;SVM8.RData&quot;)
 rm(modFit8)
 
@@ -264,20 +263,20 @@ set.seed(42)
 classe &lt;- class.ind(training$classe)
 modFit9 &lt;- nnet(training[,1:ncol(training)-1], classe, size=ncol(training)-1, MaxNWts = 10000, softmax=TRUE, maxit = 500)
 save(modFit9,file = &quot;NN9.RData&quot;)
-rm(modFit9)</code></pre>
+rm(modFit9)
+
+#neural network with single layer, with 100 unit and 1500 iterations
+set.seed(42)
+classe &lt;- class.ind(training$classe)
+modFit0 &lt;- nnet(training[,1:ncol(training)-1], classe, size=100, MaxNWts = 100000, softmax=TRUE, maxit = 3000)
+save(modFit0,file = &quot;NN0.RData&quot;)
+rm(modFit0)</code></pre>
 </div>
 </div>
 <div id="models-evaluation" class="section level2">
 <h2>Models evaluation</h2>
-<p>There are big diffrences in predictive accuracy between those models. As a meassure of predictive accuracy I used Missclalculation ration (count of misslassified cases / count of all cases).</p>
+<p>There are big diffrences in predictive accuracy between those models. As a meassure of predictive accuracy I used Misscalculation ratio (count of misslassified cases / count of all cases) and was looking for model with result of this statistic as close to 0 as possible.</p>
 <p>First step is to predict new values by computed models using both: <code>crossval</code> and <code>training</code> set so we can calculate both In and Out of Sample Errors and choose model taht will be used for final evaluation on <code>testing</code> set.</p>
-<p>Additional information regarding calculations:</p>
-<ol style="list-style-type: decimal">
-<li>For Random Forest I used two diffrent implementations as a result of testing parallelization of computing.</li>
-<li>For Multinomial Logistic Regression on top of running it on the same dataset we used for other models I’ve also run it separatly and added one additional tweak to list of features used: I’ve added polynomial components using <code>formula = classe ~ (.)^2</code> resulting in total of 781 features used in model.</li>
-<li>For Neural Networks I’ve decided to use single hidden layer network with number of nodes in hidden layer equal to number of features and 500 iterations. Using <code>nnet</code> also required one additional step: preparing response matrix for it to work (matrix containing binary decomposition of 5 class in <code>classe</code> into 5 0/1 columns)</li>
-<li>For SVM I used <code>rbfdot(sigma=0.1)</code> as kernel function just like in example prowided in help file for kernel functions.</li>
-</ol>
 <pre class="r"><code>load(&quot;NN9.RData&quot;)
 load(&quot;SVM8.RData&quot;)
 load(&quot;NB6.RData&quot;)
@@ -288,6 +287,7 @@ load(&quot;TREE3.RData&quot;)
 load(&quot;RF1.RData&quot;)
 load(&quot;MLR7.RData&quot;)
 load(&quot;MLR7P.RData&quot;)
+load(&quot;NN0.RData&quot;)
 
 max &lt;- ncol(training)-1
 
@@ -341,6 +341,10 @@ train9 &lt;- predict(modFit9,training[,1:max], type=&quot;class&quot;)
 cross9 &lt;- predict(modFit9,crossval[,1:max], type=&quot;class&quot;)
 rm(modFit9)
 
+set.seed(42)
+train0 &lt;- predict(modFit0,training[,1:max], type=&quot;class&quot;)
+cross0 &lt;- predict(modFit0,crossval[,1:max], type=&quot;class&quot;)
+rm(modFit0)
 
 errors &lt;- function(train, cross, name)
 {
@@ -367,7 +371,8 @@ error_table&lt;-rbind(
   errors(train7, cross7, &quot;MLR&quot;),
   errors(train7P, cross7P, &quot;MLR poly&quot;),
   errors(train8, cross8, &quot;SVM&quot;),
-  errors(train9, cross9, &quot;NNet&quot;)
+  errors(train9, cross9, &quot;NNet 39/500&quot;),
+  errors(train0, cross0, &quot;NNet 100/3000&quot;)
   )
 
 save(error_table,file=&quot;error.RData&quot;)</code></pre>
@@ -376,49 +381,47 @@ save(error_table,file=&quot;error.RData&quot;)</code></pre>
 <pre class="r"><code>load(&quot;error.RData&quot;)
 #ordered list of model errors
 error_table[order(error_table$OSE,decreasing = FALSE),]</code></pre>
-<pre><code>##          Name         ISE         OSE
-## 2  RF - parRF 0.008406929 0.009176651
-## 1     RF - rf 0.008661685 0.009431557
-## 9         SVM 0.002207880 0.010196278
-## 10       NNet 0.000000000 0.076981902
-## 8    MLR poly 0.068529212 0.096354830
-## 5         QDA 0.154721467 0.168493500
-## 6      NBayes 0.245754076 0.260005098
-## 7         MLR 0.345703125 0.347947999
-## 4         LDA 0.361667799 0.362987510
-## 3        Tree 0.501698370 0.508029569</code></pre>
-<p>As we can see both implementations of <strong>Random Forest</strong> produced best results, followed by <strong>SVM</strong>. All of them got <strong>Out of Sample Error of 1% or less</strong>. Noticably <strong>NNet</strong> produced In Sample Error of <strong>0.00000%</strong> - cerectly predicting all observations using <code>training</code>. Below <strong>10% OSE</strong> we also have mentioned <strong>NNet</strong> and <strong>Logistic Regression with polynomials</strong>.</p>
+<pre><code>##             Name        ISE        OSE
+## 9            SVM 0.00220788 0.01019628
+## 2     RF - parRF 0.00000000 0.01147081
+## 1        RF - rf 0.00000000 0.01325516
+## 11 NNet 100/3000 0.00000000 0.01784349
+## 10   NNet 39/500 0.00000000 0.07698190
+## 8       MLR poly 0.06852921 0.09635483
+## 5            QDA 0.15472147 0.16849350
+## 6         NBayes 0.24575408 0.26000510
+## 7            MLR 0.34570312 0.34794800
+## 4            LDA 0.36166780 0.36298751
+## 3           Tree 0.50169837 0.50802957</code></pre>
+<p>As we can see <strong>SVM</strong> produced best results, followed by both implementations of <strong>Random Forest</strong> (with <code>parRF</code> getting slightly better results than <code>rf</code>- this has been confirmed on multiple runs with diffrent samples in <code>training</code> and <code>crossval</code> sets - <code>parRF</code> seems to get slightly better results each time). All of them got <strong>Out of Sample Error of around 1%-2%</strong>. Noticably, both <strong>NNet</strong> and <strong>Random Forest</strong> produced In Sample Error of <strong>0.00000%</strong> - corectly predicting all observations using <code>training</code>. Below <strong>10% OSE</strong> we also have mentioned <strong>NNet</strong> and <strong>Logistic Regression with polynomials</strong>.</p>
 <p>In contrast <strong>Decission Tree</strong> produce 50% error on both sets.</p>
-<p>Given the results I’ve picked <strong>Random Forest, using parRF implementation</strong> as a model that will be used to predict class of observations in <code>assignment</code> dataset. Firstly I have to calculate final <strong>Out of Sample Error</strong> on <code>testing</code> set.</p>
-<pre class="r"><code>load(&quot;RF2.RData&quot;)
+<p>Given the results I’ve picked <strong>Support Vector Machine</strong> as a model that will be used to predict class of observations in <code>assignment</code> dataset. Firstly I have to calculate final <strong>Out of Sample Error</strong> on <code>testing</code> set.</p>
+<pre class="r"><code>load(&quot;SVM8.RData&quot;)
 max&lt;-ncol(training)-1
 set.seed(42)
-train2 &lt;- predict(modFit2,training[,1:max])</code></pre>
-<pre><code>## Loading required package: randomForest
-## randomForest 4.6-10
-## Type rfNews() to see new features/changes/bug fixes.</code></pre>
-<pre class="r"><code>test2 &lt;- predict(modFit2,testing[,1:max])
+train8 &lt;- predict(modFit8,training[,1:max])
+test8 &lt;- predict(modFit8,testing[,1:max])
 
 #ordered list of model errors
-ISE_table&lt;-table(train2, training$classe)
+ISE_table&lt;-table(train8, training$classe)
 ISE_table&lt;-as.matrix(ISE_table)
 ISE&lt;-(sum(ISE_table)-sum(diag(ISE_table))) / sum(ISE_table)
   
-OSE_table&lt;-table(test2, testing$classe)
+OSE_table&lt;-table(test8, testing$classe)
 OSE_table&lt;-as.matrix(OSE_table)
 OSE&lt;-(sum(OSE_table)-sum(diag(OSE_table))) / sum(OSE_table)
 
-data.frame(Name = &quot;Selected model: Random Forest&quot;, ISE = ISE, Final_OSE = OSE)</code></pre>
-<pre><code>##                            Name         ISE   Final_OSE
-## 1 Selected model: Random Forest 0.008322011 0.008921744</code></pre>
+data.frame(Name = &quot;Selected model: SVM&quot;, ISE = ISE, Final_OSE = OSE)</code></pre>
+<pre><code>##                  Name        ISE  Final_OSE
+## 1 Selected model: SVM 0.00220788 0.01019628</code></pre>
 <p>We have exactly the same number of misslasified cases on <code>testing</code> example as we had on <code>crosscalidation</code> set, producing identical error. This gives us a strong indication of how this model will behave on yet to be seen observations and can be used in predicting this type of problems.</p>
 <p>Lets take last step and calculate predictions for <code>assigmnet</code> and prepare 20 files that will be used to submit second part of this assignment.</p>
 <pre class="r"><code>set.seed(42)
-assignment$response &lt;- predict(modFit2,assignment[,1:max])
-#remember we renamed column with problem_id to classe to retain identity between sets, so thats why i choose diffrent name
+#remember we renamed column with problem_id to classe to retain identity between sets, so I return original name
 names(assignment)[40]&lt;-&quot;problem_id&quot;
-assignment$response&lt;-as.character(assignment$response)
-answers&lt;- as.vector(assignment$response)
+assignment$classe &lt;- predict(modFit8,assignment[,1:max])
+assignment$classe&lt;-as.character(assignment$classe)
+answers&lt;- as.vector(assignment$classe)
 
 pml_write_files = function(x){
   n = length(x)
